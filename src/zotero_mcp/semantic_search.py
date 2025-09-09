@@ -489,10 +489,37 @@ class ZoteroSemanticSearch:
         logger.info(f"Retrieved {len(all_items)} items from API")
         return all_items
     
-    def update_database(self, 
+    def _get_chunk_config(self) -> Dict[str, int]:
+        """Load chunking configuration from file or use defaults."""
+        config = {"chunk_size": 2000, "chunk_overlap": 200}
+        if self.config_path and os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r') as f:
+                    file_config = json.load(f)
+                    config.update(file_config.get("semantic_search", {}).get("chunk_config", {}))
+            except Exception:
+                pass
+        return config
+
+    def _split_text_into_chunks(self, text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+        """Recursively split text into overlapping chunks."""
+        if len(text) <= chunk_size:
+            return [text]
+        
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunks.append(text[start:end])
+            start += chunk_size - chunk_overlap
+        return chunks
+
+    def update_database(self,
                        force_full_rebuild: bool = False,
                        limit: Optional[int] = None,
-                       extract_fulltext: bool = False) -> Dict[str, Any]:
+                       extract_fulltext: bool = False,
+                       chunk_size: Optional[int] = None,
+                       chunk_overlap: Optional[int] = None) -> Dict[str, Any]:
         """
         Update the semantic search database with Zotero items.
         
@@ -542,9 +569,17 @@ class ZoteroSemanticSearch:
             next_milestone = 10 if stats["total_items"] >= 10 else stats["total_items"]
             # Count of items seen (including skipped), used for progress milestones
             seen_items = 0
+            
+            # Get chunking config
+            chunk_config = self._get_chunk_config()
+            final_chunk_size = chunk_size or chunk_config["chunk_size"]
+            final_chunk_overlap = chunk_overlap or chunk_config["chunk_overlap"]
+
             for i in range(0, len(all_items), batch_size):
                 batch = all_items[i:i + batch_size]
-                batch_stats = self._process_item_batch(batch, force_full_rebuild)
+                batch_stats = self._process_item_batch(
+                    batch, force_full_rebuild, final_chunk_size, final_chunk_overlap
+                )
                 
                 stats["processed_items"] += batch_stats["processed"]
                 stats["added_items"] += batch_stats["added"]
@@ -583,13 +618,13 @@ class ZoteroSemanticSearch:
             stats["duration"] = str(end_time - start_time)
             return stats
     
-    def _process_item_batch(self, items: List[Dict[str, Any]], force_rebuild: bool = False) -> Dict[str, int]:
-        """Process a batch of items."""
+    def _process_item_batch(self, items: List[Dict[str, Any]], force_rebuild: bool, chunk_size: int, chunk_overlap: int) -> Dict[str, int]:
+        """Process a batch of items, with chunking for fulltext."""
         stats = {"processed": 0, "added": 0, "updated": 0, "skipped": 0, "errors": 0}
         
-        documents = []
-        metadatas = []
-        ids = []
+        documents_to_upsert = []
+        metadatas_to_upsert = []
+        ids_to_upsert = []
         
         for item in items:
             try:
@@ -598,40 +633,57 @@ class ZoteroSemanticSearch:
                     stats["skipped"] += 1
                     continue
                 
-                # Check if item exists and needs update
-                if not force_rebuild and self.chroma_client.document_exists(item_key):
-                    # For now, skip existing items (could implement update logic here)
+                # Check if item has already been processed
+                # We check for chunk 0, which is a reliable indicator for chunked items.
+                if not force_rebuild and self.chroma_client.document_exists(f"{item_key}_chunk_0"):
                     stats["skipped"] += 1
                     continue
-                
-                # Create document text and metadata
-                # Prefer fulltext if available, else fall back to structured fields
+
+                # Get the full text if available
                 fulltext = item.get("data", {}).get("fulltext", "")
-                doc_text = fulltext if fulltext.strip() else self._create_document_text(item)
-                metadata = self._create_metadata(item)
                 
-                if not doc_text.strip():
-                    stats["skipped"] += 1
-                    continue
+                # Create base metadata for the item
+                base_metadata = self._create_metadata(item)
                 
-                documents.append(doc_text)
-                metadatas.append(metadata)
-                ids.append(item_key)
-                
+                if fulltext and fulltext.strip():
+                    # --- Chunking Logic ---
+                    chunks = self._split_text_into_chunks(fulltext, chunk_size, chunk_overlap)
+                    
+                    for i, chunk in enumerate(chunks):
+                        chunk_id = f"{item_key}_chunk_{i}"
+                        chunk_metadata = base_metadata.copy()
+                        chunk_metadata["parent_item_key"] = item_key
+                        chunk_metadata["chunk_index"] = i
+                        
+                        documents_to_upsert.append(chunk)
+                        metadatas_to_upsert.append(chunk_metadata)
+                        ids_to_upsert.append(chunk_id)
+                else:
+                    # --- Fallback for items without fulltext ---
+                    doc_text = self._create_document_text(item)
+                    if not doc_text.strip():
+                        stats["skipped"] += 1
+                        continue
+                    
+                    # Use item_key as ID for non-chunked items
+                    documents_to_upsert.append(doc_text)
+                    metadatas_to_upsert.append(base_metadata)
+                    ids_to_upsert.append(item_key)
+
                 stats["processed"] += 1
-                
+
             except Exception as e:
                 logger.error(f"Error processing item {item.get('key', 'unknown')}: {e}")
                 stats["errors"] += 1
         
-        # Add documents to ChromaDB if any
-        if documents:
+        # Upsert all generated documents (chunks and non-chunks) to ChromaDB
+        if documents_to_upsert:
             try:
-                self.chroma_client.upsert_documents(documents, metadatas, ids)
-                stats["added"] += len(documents)
+                self.chroma_client.upsert_documents(documents_to_upsert, metadatas_to_upsert, ids_to_upsert)
+                stats["added"] += len(documents_to_upsert)
             except Exception as e:
-                logger.error(f"Error adding documents to ChromaDB: {e}")
-                stats["errors"] += len(documents)
+                logger.error(f"Error upserting documents to ChromaDB: {e}")
+                stats["errors"] += len(documents_to_upsert)
         
         return stats
     
@@ -692,16 +744,21 @@ class ZoteroSemanticSearch:
         documents = chroma_results.get("documents", [[]])[0]
         metadatas = chroma_results.get("metadatas", [[]])[0]
         
-        for i, item_key in enumerate(ids):
+        for i, doc_id in enumerate(ids):
             try:
+                metadata = metadatas[i] if i < len(metadatas) else {}
+                # Determine the parent item key (for chunks) or the item key itself
+                parent_item_key = metadata.get("parent_item_key") or doc_id
+                
                 # Get full item data from Zotero
-                zotero_item = self.zotero_client.item(item_key)
+                zotero_item = self.zotero_client.item(parent_item_key)
                 
                 enriched_result = {
-                    "item_key": item_key,
+                    "item_key": parent_item_key,
+                    "chunk_id": doc_id,
                     "similarity_score": 1 - distances[i] if i < len(distances) else 0,
                     "matched_text": documents[i] if i < len(documents) else "",
-                    "metadata": metadatas[i] if i < len(metadatas) else {},
+                    "metadata": metadata,
                     "zotero_item": zotero_item,
                     "query": query
                 }
@@ -709,10 +766,10 @@ class ZoteroSemanticSearch:
                 enriched.append(enriched_result)
                 
             except Exception as e:
-                logger.error(f"Error enriching result for item {item_key}: {e}")
+                logger.error(f"Error enriching result for item {doc_id}: {e}")
                 # Include basic result even if enrichment fails
                 enriched.append({
-                    "item_key": item_key,
+                    "item_key": doc_id,
                     "similarity_score": 1 - distances[i] if i < len(distances) else 0,
                     "matched_text": documents[i] if i < len(documents) else "",
                     "metadata": metadatas[i] if i < len(metadatas) else {},
@@ -734,12 +791,27 @@ class ZoteroSemanticSearch:
         }
     
     def delete_item(self, item_key: str) -> bool:
-        """Delete an item from the semantic search database."""
+        """Delete an item and all its associated chunks from the database."""
         try:
-            self.chroma_client.delete_documents([item_key])
+            # First, delete the main item if it exists (for non-chunked items)
+            self.chroma_client.delete_documents(ids=[item_key])
+            
+            # Then, search for and delete all chunks related to this item.
+            # We use a dummy query and filter by metadata.
+            # A high n_results value ensures we get all chunks.
+            chunk_results = self.chroma_client.search(
+                query_texts=[""],
+                n_results=10000, # A high number to get all possible chunks
+                where={"parent_item_key": item_key}
+            )
+            
+            if chunk_ids := chunk_results.get("ids", [[]])[0]:
+                logger.info(f"Deleting {len(chunk_ids)} chunks for item {item_key}")
+                self.chroma_client.delete_documents(ids=chunk_ids)
+            
             return True
         except Exception as e:
-            logger.error(f"Error deleting item {item_key}: {e}")
+            logger.error(f"Error deleting item {item_key} and its chunks: {e}")
             return False
 
 

@@ -138,6 +138,10 @@ def main():
                                  help="Extract fulltext content from local Zotero database (slower but more comprehensive)")
     update_db_parser.add_argument("--config-path", 
                                  help="Path to semantic search configuration file")
+    update_db_parser.add_argument("--chunk-size", type=int, 
+                                 help="Size of text chunks for embedding")
+    update_db_parser.add_argument("--chunk-overlap", type=int,
+                                 help="Overlap between text chunks")
     
     # Database status command
     db_status_parser = subparsers.add_parser("db-status", help="Show semantic search database status")
@@ -311,7 +315,9 @@ def main():
             stats = search.update_database(
                 force_full_rebuild=args.force_rebuild,
                 limit=args.limit,
-                extract_fulltext=args.fulltext
+                extract_fulltext=args.fulltext,
+                chunk_size=args.chunk_size,
+                chunk_overlap=args.chunk_overlap
             )
             
             print(f"\nDatabase update completed:")

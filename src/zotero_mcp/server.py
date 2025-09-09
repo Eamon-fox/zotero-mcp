@@ -354,7 +354,9 @@ def get_item_fulltext(
                 if os.path.exists(file_path):
                     ctx.info(f"Downloaded file to {file_path}, converting to markdown")
                     converted_text = convert_to_markdown(file_path)
-                    return f"{metadata}\n\n---\n\n## Full Text\n\n{converted_text}"
+                    # Return an excerpt to avoid sending huge amounts of text
+                    excerpt = converted_text[:4000] + "..." if len(converted_text) > 4000 else converted_text
+                    return f"{metadata}\n\n---\n\n## Full Text (Excerpt)\n\n{excerpt}"
                 else:
                     return f"{metadata}\n\n---\n\nFile download failed."
         except Exception as download_error:

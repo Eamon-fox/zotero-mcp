@@ -137,6 +137,49 @@ zotero-mcp db-status
 
 The semantic search provides similarity scores and finds papers based on conceptual understanding, not just keyword matching.
 
+### 中文使用说明 (Chinese Instructions)
+
+#### 智能语义搜索（基于文本块）
+
+为了提升对长篇文档（尤其是PDF）的搜索精度，`zotero-mcp` 现在采用**文本块（Text Chunking）**的策略进行向量化。
+
+- **工作原理**：不再将整篇PDF或长文本作为一个单一的向量，而是将其智能地分割成多个有重叠部分的文本块。每个文本块都会被独立地向量化并存入数据库。
+- **优势**：
+    1.  **精准定位**：搜索结果可以直接定位到文档中最相关的具体段落，而不是整个文档。
+    2.  **提升相关性**：避免了因文档过长导致关键信息被稀释的问题，搜索结果更精确。
+    3.  **保留上下文**：通过文本块之间的重叠，确保了语义的连续性，不会因为分割而丢失上下文。
+
+#### 如何使用
+
+数据库的更新和构建过程与之前保持一致，但现在您可以对文本块的大小进行配置。
+
+**1. 更新数据库**
+
+推荐使用 `--fulltext` 参数来索引本地Zotero数据库中的PDF全文，以获得最佳的搜索效果。
+
+```bash
+# 使用默认配置更新并索引全文
+zotero-mcp update-db --fulltext
+
+# 强制从头开始重新构建数据库（当遇到问题时推荐使用）
+zotero-mcp update-db --fulltext --force-rebuild
+```
+
+**2. 自定义文本块（高级）**
+
+您可以通过命令行参数来控制文本块的大小和重叠部分，以调整搜索的粒度。
+
+- `--chunk-size`：每个文本块的大小（单位：字符）。默认值为 `2000`。
+- `--chunk-overlap`：相邻文本块之间的重叠大小（单位：字符）。默认值为 `200`。
+
+例如，使用较小的文本块进行索引：
+
+```bash
+zotero-mcp update-db --fulltext --chunk-size 1000 --chunk-overlap 150
+```
+
+**注意**：修改文本块配置后，建议使用 `--force-rebuild` 参数来重建整个数据库，以确保所有文档都使用新的配置。
+
 ## 🖥️ Setup & Usage
 
 Full documentation is available at [Zotero MCP docs](https://stevenyuyy.us/zotero-mcp/).
@@ -265,6 +308,7 @@ zotero-mcp update-db                       # Update semantic search database (fa
 zotero-mcp update-db --fulltext             # Update with full-text extraction (comprehensive but slower)
 zotero-mcp update-db --force-rebuild       # Force complete database rebuild
 zotero-mcp update-db --fulltext --force-rebuild  # Rebuild with full-text extraction
+zotero-mcp update-db --chunk-size 1000 --chunk-overlap 150 # Update with custom chunking
 zotero-mcp db-status                       # Show database status and info
 
 # General

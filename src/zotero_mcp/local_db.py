@@ -59,9 +59,8 @@ class ZoteroItem:
             parts.append(f"Notes: {self.notes}")
             
         if self.fulltext:
-            # Truncate fulltext to avoid overly long documents
-            truncated_fulltext = self.fulltext[:5000] + "..." if len(self.fulltext) > 5000 else self.fulltext
-            parts.append(f"Content: {truncated_fulltext}")
+            # Full text is now handled by the search indexer, no need to truncate here
+            parts.append(f"Content: {self.fulltext}")
             
         return "\n\n".join(parts)
 
@@ -179,7 +178,7 @@ class LocalZoteroReader:
                     maxpages = int(max_pages_env) if max_pages_env else 10
                 except ValueError:
                     maxpages = 10
-            text = extract_text(str(file_path), maxpages=maxpages)
+            text = extract_text(str(file_path), maxpages=None)
             return text or ""
         except Exception:
             return ""
@@ -238,9 +237,9 @@ class LocalZoteroReader:
         text = self._extract_text_from_file(target)
         if not text:
             return None
-        # Truncate to keep embeddings reasonable
+        # Return the full text; truncation and chunking are handled upstream
         source = "pdf" if target.suffix.lower() == ".pdf" else ("html" if target.suffix.lower() in {".html", ".htm"} else "file")
-        return (text[:10000], source)
+        return (text, source)
     
     def close(self):
         """Close database connection."""
